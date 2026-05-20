@@ -1,7 +1,11 @@
 # recall
 
+![recall banner](docs/banner.png)
+
 > **Find any past Claude Code / Codex session by fuzzy memory.**
 > Local-first. SQLite (FTS5) + optional vector search. One-click `claude --resume` / `codex resume`.
+
+[한국어 README](README.md)
 
 `claude --resume` and `codex resume` both ship a picker, but once you have hundreds of sessions, you can't actually *find* the one you want. You vaguely remember **the topic**, not the session id. You never renamed it. You never forked it. `recall` is for that moment.
 
@@ -25,9 +29,35 @@ The point of CLI agents is to start exactly where you left off. But "where you l
 - **FTS5 full-text + optional vector search.** SQLite's FTS5 covers exact phrases; bring your own embedding API key for semantic ("by meaning, not by word") matches.
 - **One-click resume.** `recall resume <id|keyword>` dispatches to the right CLI (`claude --resume` or `codex resume`) in the right cwd.
 
-## Install
+## Install — easiest path: **let an AI install it for you**
 
-### Build from source (Rust 1.74+)
+If you already have Claude Code or Codex, just paste a one-liner and let the agent resolve deps, build, install, and run the first scan.
+
+### With Claude Code
+
+Open `claude` and paste:
+
+```
+Install https://github.com/Hostingglobal-Tech/recall on this machine.
+If Rust isn't present, install rustup. Clone the repo, run cargo build --release, copy the binary into a PATH directory (e.g. ~/.local/bin or ~/bin), then run `recall init && recall scan`. Confirm each step.
+```
+
+### With Codex
+
+```bash
+codex "Install https://github.com/Hostingglobal-Tech/recall on this machine. If Rust is missing, install rustup. Clone the repo, run cargo build --release, drop the binary into a directory on PATH, then run 'recall init && recall scan'. Confirm each step."
+```
+
+After install:
+
+```bash
+recall search "the fuzzy thing you remember"
+recall resume "the fuzzy thing you remember"
+```
+
+---
+
+## Install — manual (Rust 1.74+ required)
 
 ```bash
 git clone https://github.com/Hostingglobal-Tech/recall.git
@@ -37,7 +67,7 @@ cargo build --release
 cp target/release/recall ~/.local/bin/   # or wherever you keep CLIs
 ```
 
-### First run
+First run:
 
 ```bash
 recall init
