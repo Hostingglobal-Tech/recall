@@ -3,7 +3,7 @@ name = "recall"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Find any past Claude Code / Codex session by fuzzy memory — local SQLite (FTS5 + vector) + one-click resume."
+description = "Find any past Claude Code / Codex session by fuzzy memory — local SQLite (FTS5) + one-click resume. AI-invoked skill, not a CLI to memorize."
 homepage = "https://github.com/Hostingglobal-Tech/recall"
 repository = "https://github.com/Hostingglobal-Tech/recall"
 keywords = ["claude-code", "codex", "session", "search", "ai"]
@@ -11,9 +11,8 @@ categories = ["command-line-utilities"]
 readme = "README.md"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
 clap = { version = "4", features = ["derive"] }
-rusqlite = { version = "0.31", features = ["bundled", "blob"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -22,8 +21,6 @@ hex = "0.4"
 anyhow = "1"
 walkdir = "2"
 dirs = "5"
-toml = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [profile.release]
 lto = true

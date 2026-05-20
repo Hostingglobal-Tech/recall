@@ -1,7 +1,7 @@
 //! recall — find any past Claude Code / Codex session by fuzzy memory.
 //!
-//! Single-node, local-first. SQLite (FTS5) + optional embedding-based ANN.
-//! No telemetry, no cloud sync, no credentials baked in.
+//! Single-node, local-first. SQLite + FTS5. **No embeddings, no API keys, no network.**
+//! AI agents call this via the bundled SKILL.md.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
@@ -44,15 +44,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
     last_prompt,
     body,
     tokenize = 'unicode61 remove_diacritics 2'
-);
-
-CREATE TABLE IF NOT EXISTS embeddings (
-    session_pk      INTEGER PRIMARY KEY,
-    model           TEXT    NOT NULL,
-    dim             INTEGER NOT NULL,
-    vec             BLOB    NOT NULL,
-    embedded_at     TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (session_pk) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS edges (
@@ -101,37 +92,42 @@ enum Cmd {
     Show {
         session_id_prefix: String,
     },
-    /// 세션 resume — Claude 면 `claude --resume`, Codex 면 `codex resume`
+    /// 세션 resume — claude 면 `claude --resume`, codex 면 `codex resume`
     Resume {
         query: String,
         #[arg(long)]
         dry_run: bool,
     },
-    /// 통계
-    Stats,
-    /// 같은 cwd + 키워드 매칭으로 연관 세션 찾기 (그래프 1-hop)
+    /// 같은 cwd 의 다른 세션 (1-hop 그래프)
     Related {
         session_id_prefix: String,
         #[arg(long, short, default_value_t = 10)]
         n: usize,
     },
-    /// 임베딩 생성 (사용자 API key 필요. 자세한 내용은 README 참조)
-    Embed {
-        #[arg(long, default_value = "all")]
-        provider: String,
-        #[arg(long)]
-        force: bool,
-    },
-    /// 의미 기반 검색 (임베딩 + cosine top-K). embed 선행 필요.
-    Semantic {
-        keyword: String,
-        #[arg(long, short, default_value_t = 10)]
-        n: usize,
+    /// provider 별 세션/메시지/사이즈 통계
+    Stats,
+    /// 주기적 자동 인덱싱 — OS 스케줄러 관리
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// OS 스케줄러에 주기 `recall scan` 등록 (Linux/macOS: crontab, Windows: Scheduled Task)
+    Install {
+        /// 인터벌 (분 단위)
+        #[arg(long, default_value_t = 30)]
+        interval_min: u32,
+    },
+    /// 등록된 자동 인덱싱 제거
+    Uninstall,
+    /// 등록 상태 확인
+    Status,
+}
+
+fn main() -> Result<()> {
     let cli = Cli::parse();
     let db_path = cli.db.unwrap_or_else(default_db_path);
     if let Some(parent) = db_path.parent() {
@@ -141,26 +137,20 @@ async fn main() -> Result<()> {
     conn.execute_batch(SCHEMA_SQL).context("apply schema")?;
 
     match cli.cmd {
-        Cmd::Init => {
-            println!("[recall] DB ready at {}", db_path.display());
-        }
-        Cmd::Scan { provider, force } => cmd_scan(&mut conn, &provider, force).await?,
+        Cmd::Init => println!("[recall] DB ready at {}", db_path.display()),
+        Cmd::Scan { provider, force } => cmd_scan(&mut conn, &provider, force)?,
         Cmd::Search { keyword, n, provider } => cmd_search(&conn, &keyword, n, provider.as_deref())?,
         Cmd::Show { session_id_prefix } => cmd_show(&conn, &session_id_prefix)?,
         Cmd::Resume { query, dry_run } => cmd_resume(&conn, &query, dry_run)?,
-        Cmd::Stats => cmd_stats(&conn)?,
         Cmd::Related { session_id_prefix, n } => cmd_related(&conn, &session_id_prefix, n)?,
-        Cmd::Embed { provider, force } => cmd_embed(&mut conn, &provider, force).await?,
-        Cmd::Semantic { keyword, n } => cmd_semantic(&conn, &keyword, n).await?,
+        Cmd::Stats => cmd_stats(&conn)?,
+        Cmd::Daemon { action } => cmd_daemon(action)?,
     }
     Ok(())
 }
 
 fn default_db_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".recall")
-        .join("recall.db")
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".recall").join("recall.db")
 }
 
 fn home() -> PathBuf {
@@ -204,7 +194,9 @@ fn truncate_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-async fn cmd_scan(conn: &mut Connection, provider_filter: &str, force: bool) -> Result<()> {
+// ────────── scan ──────────
+
+fn cmd_scan(conn: &mut Connection, provider_filter: &str, force: bool) -> Result<()> {
     println!("[recall scan] provider={} force={}", provider_filter, force);
 
     let mut known: std::collections::HashMap<(String, String), String> = std::collections::HashMap::new();
@@ -215,9 +207,7 @@ async fn cmd_scan(conn: &mut Connection, provider_filter: &str, force: bool) -> 
         })?;
         for row in rows {
             let (p, s, h) = row?;
-            if let Some(h) = h {
-                known.insert((p, s), h);
-            }
+            if let Some(h) = h { known.insert((p, s), h); }
         }
     }
     println!("[recall scan] known sessions in DB: {}", known.len());
@@ -325,7 +315,9 @@ fn parse_claude_jsonl(path: &Path) -> Result<SessionRow> {
                 if v.get("isMeta").and_then(|b| b.as_bool()).unwrap_or(false) { continue; }
                 let content = match v.get("message").and_then(|m| m.get("content")) {
                     Some(Value::String(s)) => s.clone(),
-                    Some(Value::Array(arr)) => arr.iter().filter_map(|i| i.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())).collect::<Vec<_>>().join("\n"),
+                    Some(Value::Array(arr)) => arr.iter()
+                        .filter_map(|i| i.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                        .collect::<Vec<_>>().join("\n"),
                     _ => continue,
                 };
                 if content.is_empty() { continue; }
@@ -347,9 +339,7 @@ fn parse_claude_jsonl(path: &Path) -> Result<SessionRow> {
     if last_prompt.is_none() {
         if let Some(c) = last_user_content { last_prompt = Some(truncate_chars(&c, 4000)); }
     }
-    if session_id.is_empty() {
-        anyhow::bail!("no sessionId in {:?}", path);
-    }
+    if session_id.is_empty() { anyhow::bail!("no sessionId in {:?}", path); }
 
     Ok(SessionRow {
         provider: "claude".into(),
@@ -441,8 +431,7 @@ fn upsert_session(conn: &mut Connection, rec: &SessionRow) -> Result<()> {
     )?;
     let pk: i64 = tx.query_row(
         "SELECT id FROM sessions WHERE provider=?1 AND session_id=?2",
-        params![rec.provider, rec.session_id],
-        |r| r.get(0),
+        params![rec.provider, rec.session_id], |r| r.get(0),
     )?;
     tx.execute("DELETE FROM sessions_fts WHERE session_pk=?1", params![pk])?;
     tx.execute(
@@ -468,6 +457,8 @@ fn rebuild_edges(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+// ────────── search ──────────
+
 fn cmd_search(conn: &Connection, keyword: &str, n: usize, provider: Option<&str>) -> Result<()> {
     let mut sql = String::from(
         r#"SELECT s.provider, s.session_id, s.cwd, s.title, s.last_prompt, s.last_ts,
@@ -481,10 +472,10 @@ fn cmd_search(conn: &Connection, keyword: &str, n: usize, provider: Option<&str>
     sql.push_str(&n.to_string());
     let mut stmt = conn.prepare(&sql)?;
     let pattern = fts5_escape(keyword);
-    let rows = if let Some(p) = provider {
-        stmt.query_map(params![pattern, p], extract_search_row)?.collect::<Result<Vec<_>, _>>()?
+    let rows: Vec<SearchRow> = if let Some(p) = provider {
+        stmt.query_map(params![pattern, p], extract_search_row)?.collect::<rusqlite::Result<Vec<_>>>()?
     } else {
-        stmt.query_map(params![pattern], extract_search_row)?.collect::<Result<Vec<_>, _>>()?
+        stmt.query_map(params![pattern], extract_search_row)?.collect::<rusqlite::Result<Vec<_>>>()?
     };
     print_search_results(&rows, keyword);
     Ok(())
@@ -513,16 +504,12 @@ struct SearchRow {
 }
 
 fn fts5_escape(q: &str) -> String {
-    // 사용자 입력을 phrase 로 감싸서 FTS5 syntax 보호
     let cleaned: String = q.chars().filter(|c| *c != '"').collect();
     format!("\"{}\"", cleaned)
 }
 
 fn print_search_results(rows: &[SearchRow], keyword: &str) {
-    if rows.is_empty() {
-        println!("no matches for '{}'", keyword);
-        return;
-    }
+    if rows.is_empty() { println!("no matches for '{}'", keyword); return; }
     println!("{:<7} {:<10} {:<19} {:<28}  {}", "PROV", "SID_8", "LAST_TS", "TITLE", "EXCERPT");
     println!("{}", "-".repeat(160));
     for r in rows {
@@ -531,10 +518,12 @@ fn print_search_results(rows: &[SearchRow], keyword: &str) {
         let ts = r.last_ts.clone().unwrap_or_default();
         let excerpt = r.excerpt.replace('\n', " ").chars().take(80).collect::<String>();
         println!("{:<7} {:<10} {:<19} {:<28}  {}", r.provider, short, ts, title_t, excerpt);
-        let _ = r.cwd; let _ = r.last_prompt;
+        let _ = (&r.cwd, &r.last_prompt);
     }
     println!("\n{} matches for '{}'", rows.len(), keyword);
 }
+
+// ────────── show ──────────
 
 fn cmd_show(conn: &Connection, prefix: &str) -> Result<()> {
     let mut stmt = conn.prepare(
@@ -550,11 +539,8 @@ fn cmd_show(conn: &Connection, prefix: &str) -> Result<()> {
             r.get::<_, Option<String>>(6)?, r.get::<_, Option<String>>(7)?, r.get::<_, Option<String>>(8)?,
             r.get::<_, i32>(9)?, r.get::<_, i32>(10)?, r.get::<_, i32>(11)?, r.get::<_, i64>(12)?,
         ))
-    })?.collect::<Result<Vec<_>, _>>()?;
-    if rows.is_empty() {
-        eprintln!("no session for prefix '{}'", prefix);
-        std::process::exit(1);
-    }
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() { eprintln!("no session for prefix '{}'", prefix); std::process::exit(1); }
     for (prov, sid, cwd, src, title, fp, lp, fts, lts, mc, umc, amc, fs) in rows {
         println!("──────────────────────────────────────────");
         println!("provider   : {}", prov);
@@ -572,16 +558,16 @@ fn cmd_show(conn: &Connection, prefix: &str) -> Result<()> {
     Ok(())
 }
 
+// ────────── resume ──────────
+
 fn cmd_resume(conn: &Connection, query: &str, dry_run: bool) -> Result<()> {
     let sid_pat = format!("{}%", query);
-    // 1) session_id prefix 매칭
     let mut stmt = conn.prepare(
         "SELECT provider, session_id, cwd FROM sessions WHERE session_id LIKE ?1 ORDER BY last_ts DESC LIMIT 5",
     )?;
     let mut hits: Vec<(String, String, Option<String>)> = stmt
         .query_map(params![sid_pat], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
-    // 2) FTS 키워드 매칭
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     if hits.is_empty() {
         let mut fts = conn.prepare(
             r#"SELECT s.provider, s.session_id, s.cwd
@@ -590,12 +576,9 @@ fn cmd_resume(conn: &Connection, query: &str, dry_run: bool) -> Result<()> {
         )?;
         let pat = fts5_escape(query);
         hits = fts.query_map(params![pat], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<rusqlite::Result<Vec<_>>>()?;
     }
-    if hits.is_empty() {
-        eprintln!("[recall resume] no match for '{}'", query);
-        std::process::exit(1);
-    }
+    if hits.is_empty() { eprintln!("[recall resume] no match for '{}'", query); std::process::exit(1); }
     if hits.len() > 1 {
         println!("multiple matches for '{}':\n", query);
         for (p, sid, cwd) in &hits {
@@ -623,6 +606,8 @@ fn cmd_resume(conn: &Connection, query: &str, dry_run: bool) -> Result<()> {
     let status = cmd.status()?;
     std::process::exit(status.code().unwrap_or(1));
 }
+
+// ────────── stats / related ──────────
 
 fn cmd_stats(conn: &Connection) -> Result<()> {
     let mut stmt = conn.prepare(
@@ -654,11 +639,8 @@ fn cmd_related(conn: &Connection, prefix: &str, n: usize) -> Result<()> {
     ))?;
     let rows = stmt.query_map(params![pk], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?, r.get::<_, String>(5)?))
-    })?.collect::<Result<Vec<_>, _>>()?;
-    if rows.is_empty() {
-        println!("no related sessions found.");
-        return Ok(());
-    }
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() { println!("no related sessions found."); return Ok(()); }
     println!("{:<7} {:<10} {:<19} {:<12} {}", "PROV", "SID_8", "LAST_TS", "EDGE", "TITLE");
     println!("{}", "-".repeat(110));
     for (p, sid, _cwd, title, lts, kind) in rows {
@@ -669,156 +651,84 @@ fn cmd_related(conn: &Connection, prefix: &str, n: usize) -> Result<()> {
     Ok(())
 }
 
-// ────────── Embeddings (Phase 2 — requires user API key) ──────────
+// ────────── daemon ──────────
 
-#[derive(Deserialize, Default)]
-struct RecallConfig {
-    #[serde(default)]
-    embedding: EmbeddingConfig,
-}
-
-#[derive(Deserialize, Default)]
-struct EmbeddingConfig {
-    /// "openai" / "voyage" / (extend later)
-    #[serde(default)]
-    provider: String,
-    /// e.g. "text-embedding-3-small"
-    #[serde(default)]
-    model: String,
-    /// env var name that holds the API key
-    #[serde(default)]
-    api_key_env: String,
-}
-
-fn load_config() -> RecallConfig {
-    let path = home().join(".recall").join("config.toml");
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| toml::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-async fn cmd_embed(conn: &mut Connection, provider_filter: &str, force: bool) -> Result<()> {
-    let cfg = load_config();
-    if cfg.embedding.provider.is_empty() {
-        eprintln!("No embedding provider configured.");
-        eprintln!("Create ~/.recall/config.toml with:");
-        eprintln!("[embedding]\nprovider = \"openai\"\nmodel = \"text-embedding-3-small\"\napi_key_env = \"OPENAI_API_KEY\"");
-        std::process::exit(2);
+fn cmd_daemon(action: DaemonAction) -> Result<()> {
+    let bin = std::env::current_exe().context("locate current exe")?;
+    let bin_str = bin.to_string_lossy().into_owned();
+    match action {
+        DaemonAction::Install { interval_min } => daemon_install(&bin_str, interval_min),
+        DaemonAction::Uninstall => daemon_uninstall(),
+        DaemonAction::Status => daemon_status(),
     }
-    let api_key = std::env::var(&cfg.embedding.api_key_env)
-        .with_context(|| format!("env var {} not set", cfg.embedding.api_key_env))?;
-    let model = cfg.embedding.model.clone();
+}
 
-    let mut stmt = conn.prepare(
-        r#"SELECT s.id, s.first_prompt, s.last_prompt, s.title
-           FROM sessions s LEFT JOIN embeddings e ON e.session_pk = s.id
-           WHERE (?1='all' OR s.provider=?1) AND (?2 OR e.session_pk IS NULL)"#,
-    )?;
-    let force_i: i64 = if force { 1 } else { 0 };
-    let targets: Vec<(i64, String)> = stmt
-        .query_map(params![provider_filter, force_i], |r| {
-            let id: i64 = r.get(0)?;
-            let fp: Option<String> = r.get(1)?;
-            let lp: Option<String> = r.get(2)?;
-            let t: Option<String> = r.get(3)?;
-            let text = [t.as_deref().unwrap_or(""), fp.as_deref().unwrap_or(""), lp.as_deref().unwrap_or("")].join("\n").trim().to_string();
-            Ok((id, text))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    println!("[recall embed] {} sessions to embed (model={})", targets.len(), model);
-    let client = reqwest::Client::new();
-    for (i, (pk, text)) in targets.iter().enumerate() {
-        if text.is_empty() { continue; }
-        match embed_text(&client, &cfg.embedding.provider, &model, &api_key, text).await {
-            Ok(vec) => {
-                let dim = vec.len() as i64;
-                let blob = vec_to_blob(&vec);
-                conn.execute(
-                    r#"INSERT INTO embeddings (session_pk, model, dim, vec)
-                       VALUES (?1, ?2, ?3, ?4)
-                       ON CONFLICT(session_pk) DO UPDATE SET model=?2, dim=?3, vec=?4, embedded_at=CURRENT_TIMESTAMP"#,
-                    params![pk, model, dim, blob],
-                )?;
-                if (i + 1) % 10 == 0 { println!("[recall embed] {}/{}", i + 1, targets.len()); }
-            }
-            Err(e) => eprintln!("[recall embed] err pk={}: {}", pk, e),
-        }
-    }
-    println!("[recall embed] DONE");
+#[cfg(target_os = "windows")]
+fn daemon_install(bin: &str, interval_min: u32) -> Result<()> {
+    let tr = format!("\"{}\" scan", bin);
+    let status = std::process::Command::new("schtasks")
+        .args(["/Create", "/TN", "recall-scan", "/TR", &tr, "/SC", "MINUTE", "/MO", &interval_min.to_string(), "/F"])
+        .status()
+        .context("invoke schtasks")?;
+    if !status.success() { anyhow::bail!("schtasks /Create failed"); }
+    println!("[recall daemon] Windows Scheduled Task 'recall-scan' registered (every {} min)", interval_min);
     Ok(())
 }
 
-async fn embed_text(client: &reqwest::Client, provider: &str, model: &str, api_key: &str, text: &str) -> Result<Vec<f32>> {
-    match provider {
-        "openai" => {
-            #[derive(Serialize)]
-            struct Req<'a> { input: &'a str, model: &'a str }
-            #[derive(Deserialize)]
-            struct Resp { data: Vec<RespItem> }
-            #[derive(Deserialize)]
-            struct RespItem { embedding: Vec<f32> }
-            let r: Resp = client
-                .post("https://api.openai.com/v1/embeddings")
-                .bearer_auth(api_key)
-                .json(&Req { input: text, model })
-                .send().await?.error_for_status()?.json().await?;
-            r.data.into_iter().next().map(|i| i.embedding).context("empty embedding response")
-        }
-        other => anyhow::bail!("provider {} not implemented; see README to extend", other),
-    }
+#[cfg(target_os = "windows")]
+fn daemon_uninstall() -> Result<()> {
+    let _ = std::process::Command::new("schtasks").args(["/Delete", "/TN", "recall-scan", "/F"]).status();
+    println!("[recall daemon] Scheduled Task 'recall-scan' removed (if it existed)");
+    Ok(())
 }
 
-fn vec_to_blob(v: &[f32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(v.len() * 4);
-    for x in v { out.extend_from_slice(&x.to_le_bytes()); }
-    out
+#[cfg(target_os = "windows")]
+fn daemon_status() -> Result<()> {
+    let output = std::process::Command::new("schtasks").args(["/Query", "/TN", "recall-scan"]).output()?;
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    Ok(())
 }
 
-fn blob_to_vec(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+#[cfg(not(target_os = "windows"))]
+fn daemon_install(bin: &str, interval_min: u32) -> Result<()> {
+    use std::io::Write;
+    let new_line = format!("*/{} * * * * {} scan >> /tmp/recall-scan.log 2>&1\n", interval_min, bin);
+    let current = std::process::Command::new("crontab").arg("-l").output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let filtered: String = current.lines().filter(|l| !l.contains("recall scan")).map(|l| format!("{}\n", l)).collect();
+    let merged = format!("{}{}", filtered, new_line);
+    let mut child = std::process::Command::new("crontab").arg("-")
+        .stdin(std::process::Stdio::piped()).spawn().context("spawn crontab")?;
+    child.stdin.as_mut().unwrap().write_all(merged.as_bytes())?;
+    let status = child.wait()?;
+    if !status.success() { anyhow::bail!("crontab failed"); }
+    println!("[recall daemon] crontab entry registered (every {} min): {}", interval_min, new_line.trim_end());
+    Ok(())
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() { return 0.0; }
-    let mut dot = 0.0f32; let mut na = 0.0f32; let mut nb = 0.0f32;
-    for (x, y) in a.iter().zip(b.iter()) { dot += x * y; na += x * x; nb += y * y; }
-    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na.sqrt() * nb.sqrt()) }
+#[cfg(not(target_os = "windows"))]
+fn daemon_uninstall() -> Result<()> {
+    use std::io::Write;
+    let current = std::process::Command::new("crontab").arg("-l").output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let filtered: String = current.lines().filter(|l| !l.contains("recall scan")).map(|l| format!("{}\n", l)).collect();
+    let mut child = std::process::Command::new("crontab").arg("-")
+        .stdin(std::process::Stdio::piped()).spawn()?;
+    child.stdin.as_mut().unwrap().write_all(filtered.as_bytes())?;
+    let _ = child.wait()?;
+    println!("[recall daemon] crontab 'recall scan' entries removed");
+    Ok(())
 }
 
-async fn cmd_semantic(conn: &Connection, keyword: &str, n: usize) -> Result<()> {
-    let cfg = load_config();
-    if cfg.embedding.provider.is_empty() {
-        eprintln!("Configure ~/.recall/config.toml first. See README.");
-        std::process::exit(2);
-    }
-    let api_key = std::env::var(&cfg.embedding.api_key_env)
-        .with_context(|| format!("env var {} not set", cfg.embedding.api_key_env))?;
-    let client = reqwest::Client::new();
-    let qv = embed_text(&client, &cfg.embedding.provider, &cfg.embedding.model, &api_key, keyword).await?;
-
-    let mut stmt = conn.prepare("SELECT session_pk, vec FROM embeddings")?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut scored: Vec<(i64, f32)> = rows.iter()
-        .map(|(pk, blob)| (*pk, cosine(&qv, &blob_to_vec(blob))))
-        .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(n);
-
-    println!("{:<7} {:<10} {:<19} {:<28}  {:>6}", "PROV", "SID_8", "LAST_TS", "TITLE", "SCORE");
-    println!("{}", "-".repeat(90));
-    for (pk, score) in &scored {
-        let row: rusqlite::Result<(String, String, Option<String>, Option<String>)> = conn.query_row(
-            "SELECT provider, session_id, last_ts, title FROM sessions WHERE id=?1",
-            params![pk], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        );
-        if let Ok((p, sid, lts, title)) = row {
-            let short = &sid[..8.min(sid.len())];
-            let title_t: String = title.unwrap_or_default().chars().take(28).collect();
-            println!("{:<7} {:<10} {:<19} {:<28}  {:>6.3}", p, short, lts.unwrap_or_default(), title_t, score);
-        }
-    }
+#[cfg(not(target_os = "windows"))]
+fn daemon_status() -> Result<()> {
+    let output = std::process::Command::new("crontab").arg("-l").output()?;
+    let s = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = s.lines().filter(|l| l.contains("recall scan")).collect();
+    if lines.is_empty() { println!("[recall daemon] no crontab entry for recall scan"); }
+    else { for l in lines { println!("{}", l); } }
     Ok(())
 }

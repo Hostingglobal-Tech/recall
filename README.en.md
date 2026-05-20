@@ -2,94 +2,73 @@
 
 ![recall banner](docs/banner.png)
 
-> **One fuzzy phrase. Any past Claude Code / Codex session, back at your fingertips.**
-> Not a CLI you type by hand — a **skill that Claude Code / Codex call for you, in-place, when you describe what you vaguely remember.**
+> **One fuzzy phrase. Any past Claude Code / Codex session, back in front of you.**
+> A skill that Claude Code / Codex invoke for you. 100% local, no API key, zero outbound traffic.
 
-[한국어 README](README.md)
+[한국어](README.md)
 
 ---
 
-## How you actually use it
-
-You never have to rename or fork a session. Inside Claude Code or Codex, just say what you remember in plain words:
+## ⚡ The 30-second pitch
 
 ```
 You: continue the deno auth-header session we had the other day.
 
-AI:  Searching with recall.
-     ➜ recall search "deno auth header"
-     2 matches:
-       • claude / 3cca0676 / "wire auth header to deno"   / 2026-05-20
-       • codex  / 019e3891 / "...Deno WS auth header mid" / 2026-05-18
-     Resuming the more recent claude session.
+AI:  ➜ recall search "deno auth header"
+     2 matches. Resuming the more recent claude session.
      ➜ recall resume 3cca0676
 
 [that session is alive again, in the original cwd]
 ```
 
-You don't have to remember `recall`'s commands. **The AI reads SKILL.md and dispatches on its own.**
+— You don't memorize `recall`'s commands. **The AI reads SKILL.md and dispatches on its own.**
 
 ---
 
-## Why
+## 🧩 Why
 
-`claude --resume` and `codex resume` both ship a picker, but once you have hundreds of sessions the picker doesn't tell you *what each one was trying to do.* You never renamed them. You never forked them. The only thing you remember is the topic. recall takes that topic and lands you back in the right session.
-
-- **Local-first.** Sessions never leave the box. No cloud sync, no telemetry.
-- **Two tools, one index.** Claude Code (`~/.claude/projects/`) + Codex (`~/.codex/history.jsonl`) co-located.
-- **FTS5 full-text + optional embeddings.** Keyword first; bring your own API key for semantic ("by meaning") fallback.
-- **One-click resume.** The AI dispatches to `claude --resume` / `codex resume` in the original cwd.
-- **A skill for AI agents.** SKILL.md is keyed on Korean + English trigger phrases so natural-language requests just work.
+| Pain | recall |
+|---|---|
+| Hundreds of sessions — `claude --resume` / `codex resume` pickers can't surface the right one | Full-text match across body & prompts (SQLite FTS5) |
+| You never renamed or forked — and now can't find the session | Just a keyword, no session_id needed |
+| Cloud sync is overkill / unwanted | **100% local**. Zero network calls, zero telemetry, zero API keys |
+| Two tools, two scattered histories | Single index for Claude Code + Codex |
+| Manual reindexing is annoying | `recall daemon install` → auto-scan every 30 min |
 
 ---
 
-## Install — let an AI do it (recommended)
+## 🚀 Install — let an AI do it (recommended)
 
-If you already have Claude Code or Codex installed and OAuth-authenticated, hand the whole install off in one paste. Dependencies, build, PATH, **skill registration**, first index — all of it.
+If Claude Code or Codex is already OAuth-authenticated, paste this in and walk away.
 
-### With Claude Code
-
-Inside `claude`:
+### Claude Code
 
 ```
 Please install https://github.com/Hostingglobal-Tech/recall on this machine.
 
 1. If Rust is missing, install rustup.
-2. Clone the repo to ~/.local/share/recall and run cargo build --release.
-3. Copy target/release/recall into a PATH directory (e.g. ~/.local/bin).
+2. Clone to ~/.local/share/recall and run cargo build --release.
+3. Copy target/release/recall to a PATH dir (e.g. ~/.local/bin).
 4. Copy plugins/claude/SKILL.md to ~/.claude/skills/recall/SKILL.md (skill registration).
-5. Run `recall init && recall scan`.
-
-Confirm each step as you go.
+5. Run recall init && recall scan && recall daemon install.
+6. Confirm each step.
 ```
 
-### With Codex
-
-One shell line:
+### Codex
 
 ```bash
-codex "Install https://github.com/Hostingglobal-Tech/recall on this machine.\
- 1) install rustup if missing,\
- 2) clone to ~/.local/share/recall and cargo build --release,\
- 3) copy the binary into ~/.local/bin (or any PATH dir),\
- 4) copy plugins/claude/SKILL.md to ~/.claude/skills/recall/SKILL.md so AI agents can use it as a skill,\
- 5) finally run 'recall init && recall scan'.\
- Confirm each step."
+codex "Install https://github.com/Hostingglobal-Tech/recall. If Rust is missing, install rustup. Clone to ~/.local/share/recall, cargo build --release, put binary on PATH, copy plugins/claude/SKILL.md to ~/.claude/skills/recall/SKILL.md, then run 'recall init && recall scan && recall daemon install'."
 ```
 
-Once installed, **you never type `recall` commands.** You just talk:
+After install, **never type the commands again** — just say what you remember:
 
-```
-> continue yesterday's oauth wiring session.
-> where did we hash out that supabase RLS policy last week?
-> resume the k8s ingress debugging we did Tuesday.
-```
+> "continue yesterday's oauth wiring session"
+> "where was the supabase RLS thing we did last week?"
+> "resume the k8s ingress debugging from Tuesday"
 
 ---
 
-## Install — manual (optional)
-
-Rust 1.74+ required.
+## 🛠️ Install — manual (Rust 1.74+)
 
 ```bash
 git clone https://github.com/Hostingglobal-Tech/recall.git ~/.local/share/recall
@@ -97,88 +76,78 @@ cd ~/.local/share/recall
 cargo build --release
 cp target/release/recall ~/.local/bin/
 
-# register the skill so Claude Code picks it up
+# Register the skill
 mkdir -p ~/.claude/skills/recall
 cp plugins/claude/SKILL.md ~/.claude/skills/recall/SKILL.md
 
-# first index
+# First index + auto-scan
 recall init
 recall scan
+recall daemon install              # every 30 min
 ```
 
 ---
 
-## Commands the AI invokes (for reference)
+## 🔁 Auto-indexing
 
-You normally don't need to type these. The AI calls them per SKILL.md.
+New sessions get picked up automatically — you don't touch a thing.
+
+```bash
+recall daemon install --interval-min 30   # register (default 30 min)
+recall daemon status                       # check registration
+recall daemon uninstall                    # remove
+```
+
+Backends:
+- **Linux / macOS** → adds a `crontab` line
+- **Windows** → registers Scheduled Task `recall-scan`
+
+---
+
+## 🤖 Commands the AI invokes (for reference)
+
+You normally don't need to type these.
 
 | Command | What it does |
 |---|---|
-| `recall init` | create `~/.recall/recall.db` (idempotent) |
-| `recall scan [--provider claude\|codex\|all] [--force]` | walk local session files, upsert into DB |
-| `recall search "<keyword>"` | FTS5 full-text search across title / prompts / body |
-| `recall semantic "<keyword>"` | embedding cosine top-K (requires API key) |
-| `recall show <session_id_prefix>` | show metadata + first/last prompt |
-| `recall resume <id\|keyword>` | dispatch to `claude --resume` / `codex resume` in the original cwd |
+| `recall init` | create `~/.recall/recall.db` |
+| `recall scan [--provider claude\|codex\|all] [--force]` | sha256-incremental indexing |
+| `recall search "<keyword>"` | FTS5 full-text (title + first/last prompt + body) |
+| `recall show <session_id_prefix>` | metadata + first/last prompt |
+| `recall resume <id\|keyword> [--dry-run]` | dispatch `claude --resume` / `codex resume` in original cwd |
 | `recall related <session_id_prefix>` | sessions sharing the same `cwd` (1-hop graph) |
-| `recall embed [--provider all] [--force]` | embed sessions (requires API key) |
-| `recall stats` | per-provider counts / last activity |
+| `recall stats` | per-provider counts |
+| `recall daemon install/status/uninstall` | manage auto-scan |
 
 ---
 
-## Optional: semantic search
-
-`recall search` (FTS5) matches keywords. For "by meaning" matches, opt into embeddings:
-
-1. Get an OpenAI API key (https://platform.openai.com/api-keys).
-2. `export OPENAI_API_KEY=sk-...`
-3. `~/.recall/config.toml`:
-   ```toml
-   [embedding]
-   provider    = "openai"
-   model       = "text-embedding-3-small"
-   api_key_env = "OPENAI_API_KEY"
-   ```
-4. After each `scan`:
-   ```bash
-   recall embed
-   ```
-
-The AI will now use semantic fallback automatically (SKILL.md instructs it).
-
-To use a different provider (Voyage / Cohere / local Ollama), extend `embed_text` in `src/main.rs` — ~10 lines.
-
----
-
-## Data layout
+## 📂 Data layout
 
 ```
-~/.recall/
-├── recall.db          # SQLite (sessions, sessions_fts, embeddings, edges)
-└── config.toml        # OPTIONAL — only if you want embeddings
+~/.recall/recall.db   # SQLite (sessions + FTS5 + edges only)
 ```
 
 Schema:
-
 ```sql
 sessions       (id, provider, session_id, cwd, title, first/last_prompt, ...)
-sessions_fts   FTS5 virtual table over title + prompts + body
-embeddings     (session_pk → BLOB of f32 vector + model + dim)
-edges          (src_pk, dst_pk, kind, weight)  -- 1-hop graph (same_cwd, future: shared_entity)
+sessions_fts   FTS5 virtual table (title + prompts + body)
+edges          (src_pk, dst_pk, kind, weight)   -- 1-hop graph (same_cwd)
 ```
+
+No API key. No config file. No external services.
 
 ---
 
-## Privacy & safety
+## 🔒 Privacy
 
-- **Nothing leaves your machine** unless *you* configure an embedding API key (HTTPS to your chosen provider — the only network call).
+- **Zero network calls.** Install, build, run — nothing reaches out.
 - **No telemetry.**
-- recall **reads** `~/.claude/projects/`, `~/.codex/history.jsonl`, and **writes** only to `~/.recall/`. Original session files are untouched.
+- Original session files are **read-only**. `recall` writes only to `~/.recall/`.
 - `resume` execs the official `claude` / `codex` binary — recall never mutates conversation state.
 
 ---
 
-## FAQ
+## ❓ FAQ
 
 **Does it work without `claude` / `codex` installed?** `search` / `show` yes. `resume` needs the original CLI on PATH.
 
@@ -186,10 +155,10 @@ edges          (src_pk, dst_pk, kind, weight)  -- 1-hop graph (same_cwd, future:
 
 **Re-scanning old jsonl?** sha256-incremental — unchanged files skip.
 
-**Cursor / Continue / Gemini / Aider?** PRs welcome. Single-tool focus keeps the picker honest.
+**Cursor / Continue / Gemini / Aider?** PRs welcome.
 
 ---
 
-## License
+## 📜 License
 
-MIT — [LICENSE](LICENSE)
+[MIT](LICENSE)
