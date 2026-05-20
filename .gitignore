@@ -1,0 +1,11 @@
+/target
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.recall/
+**/config.toml
+.env
+.env.local
+.DS_Store
+*.swp
