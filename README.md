@@ -63,8 +63,12 @@ https://github.com/Hostingglobal-Tech/recall 를 이 머신에 설치해줘.
 ### Codex
 
 ```bash
-codex "Install https://github.com/Hostingglobal-Tech/recall. If Rust is missing, install rustup. Clone to ~/.local/share/recall, cargo build --release, put binary on PATH, copy plugins/claude/SKILL.md to ~/.claude/skills/recall/SKILL.md, then run 'recall init && recall scan && recall daemon install'."
+codex "Install https://github.com/Hostingglobal-Tech/recall. If Rust is missing, install rustup. Clone to ~/.local/share/recall, cargo build --release, put binary on PATH, copy plugins/codex/SKILL.md to ~/.codex/skills/recall/SKILL.md, then run 'recall init && recall scan && recall daemon install'."
 ```
+
+> Claude Code 와 Codex 를 같은 머신에서 모두 쓴다면 두 skill 모두 등록하세요:
+> `cp plugins/claude/SKILL.md ~/.claude/skills/recall/SKILL.md` (Claude)
+> `cp plugins/codex/SKILL.md ~/.codex/skills/recall/SKILL.md` (Codex)
 
 설치 후 — 명령을 외우지 마세요. 그냥 자연어로 말하면 됩니다:
 
@@ -85,6 +89,10 @@ cp target/release/recall ~/.local/bin/
 # Claude Code skill 등록
 mkdir -p ~/.claude/skills/recall
 cp plugins/claude/SKILL.md ~/.claude/skills/recall/SKILL.md
+
+# Codex skill 등록 (Codex 도 쓰는 머신이면 같이)
+mkdir -p ~/.codex/skills/recall
+cp plugins/codex/SKILL.md ~/.codex/skills/recall/SKILL.md
 
 # 첫 인덱싱 + 자동 인덱싱 등록
 recall init

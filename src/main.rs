@@ -164,6 +164,30 @@ fn codex_history_path() -> PathBuf {
     home().join(".codex").join("history.jsonl")
 }
 
+fn codex_sessions_root() -> PathBuf {
+    home().join(".codex").join("sessions")
+}
+
+fn codex_session_index_path() -> PathBuf {
+    home().join(".codex").join("session_index.jsonl")
+}
+
+fn load_codex_session_index() -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let path = codex_session_index_path();
+    let body = match std::fs::read_to_string(&path) { Ok(b) => b, Err(_) => return map };
+    for line in body.lines() {
+        if line.trim().is_empty() { continue; }
+        let v: Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => continue };
+        let id = v.get("id").and_then(|s| s.as_str()).unwrap_or("");
+        let name = v.get("thread_name").and_then(|s| s.as_str()).unwrap_or("");
+        if !id.is_empty() && !name.is_empty() {
+            map.insert(id.to_string(), name.to_string());
+        }
+    }
+    map
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct SessionRow {
     provider: String,
@@ -246,11 +270,46 @@ fn cmd_scan(conn: &mut Connection, provider_filter: &str, force: bool) -> Result
     }
 
     if provider_filter == "all" || provider_filter == "codex" {
-        let codex = codex_history_path();
-        if codex.is_file() {
-            match parse_codex_history(&codex) {
+        // Primary: walk ~/.codex/sessions/**/rollout-*.jsonl (modern Codex, one file = one session)
+        let sessions_root = codex_sessions_root();
+        let title_map = load_codex_session_index();
+        let mut rollout_session_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        if sessions_root.is_dir() {
+            for entry in walkdir::WalkDir::new(&sessions_root).into_iter().filter_map(|e| e.ok()) {
+                if !entry.file_type().is_file() { continue; }
+                let path = entry.path();
+                let fname = match path.file_name().and_then(|s| s.to_str()) { Some(n) => n, None => continue };
+                if !fname.starts_with("rollout-") || !fname.ends_with(".jsonl") { continue; }
+                scanned += 1;
+                match parse_codex_rollout(path, &title_map) {
+                    Ok(rec) => {
+                        rollout_session_ids.insert(rec.session_id.clone());
+                        let key = (rec.provider.clone(), rec.session_id.clone());
+                        if !force {
+                            if let Some(prev) = known.get(&key) {
+                                if prev == &rec.content_sha256 { skipped += 1; continue; }
+                            }
+                        }
+                        match upsert_session(conn, &rec) {
+                            Ok(_) => upserted += 1,
+                            Err(e) => { errors += 1; eprintln!("[recall scan] codex rollout upsert err {:?}: {}", path, e); }
+                        }
+                    }
+                    Err(e) => { errors += 1; eprintln!("[recall scan] codex rollout parse err {:?}: {}", path, e); }
+                }
+            }
+        } else {
+            println!("[recall scan] no Codex sessions root: {}", sessions_root.display());
+        }
+
+        // Fallback: history.jsonl for session_ids not in sessions/ (legacy / pre-rollout Codex)
+        let codex_history = codex_history_path();
+        if codex_history.is_file() {
+            match parse_codex_history(&codex_history) {
                 Ok(records) => {
                     for rec in records {
+                        if rollout_session_ids.contains(&rec.session_id) { continue; }
                         scanned += 1;
                         let key = (rec.provider.clone(), rec.session_id.clone());
                         if !force {
@@ -260,14 +319,12 @@ fn cmd_scan(conn: &mut Connection, provider_filter: &str, force: bool) -> Result
                         }
                         match upsert_session(conn, &rec) {
                             Ok(_) => upserted += 1,
-                            Err(e) => { errors += 1; eprintln!("[recall scan] codex upsert err {}: {}", rec.session_id, e); }
+                            Err(e) => { errors += 1; eprintln!("[recall scan] codex history upsert err {}: {}", rec.session_id, e); }
                         }
                     }
                 }
-                Err(e) => { errors += 1; eprintln!("[recall scan] codex parse err: {}", e); }
+                Err(e) => { errors += 1; eprintln!("[recall scan] codex history parse err: {}", e); }
             }
-        } else {
-            println!("[recall scan] no Codex history at {}", codex.display());
         }
     }
 
@@ -356,6 +413,133 @@ fn parse_claude_jsonl(path: &Path) -> Result<SessionRow> {
         file_size,
         content_sha256: sha,
         body_full: body,
+    })
+}
+
+/// Modern Codex stores one rollout JSONL per session under
+/// ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
+/// First line: {"timestamp", "type":"session_meta", "payload":{"id","timestamp","cwd",...}}
+/// Then: {"timestamp", "type":"response_item", "payload":{"type":"message","role","content":[{"type":"input_text"|"output_text","text":"..."}]}}
+/// (also "event_msg" lines for turn lifecycle — ignored for indexing)
+fn parse_codex_rollout(path: &Path, title_map: &std::collections::HashMap<String, String>) -> Result<SessionRow> {
+    let raw = std::fs::read_to_string(path).context("read codex rollout")?;
+    let sha = sha256_hex(raw.as_bytes());
+    let file_size = raw.len() as i64;
+
+    let mut session_id = String::new();
+    let mut cwd: Option<String> = None;
+    let mut first_ts: Option<DateTime<Utc>> = None;
+    let mut last_ts: Option<DateTime<Utc>> = None;
+    let mut first_prompt: Option<String> = None;
+    let mut last_user_content: Option<String> = None;
+    let mut user_msg_count = 0i32;
+    let mut asst_msg_count = 0i32;
+    // body is the conversation text only (role-tagged), not the raw JSONL — keeps fts5 index focused.
+    let mut body_buf = String::new();
+
+    for line in raw.lines() {
+        if line.trim().is_empty() { continue; }
+        let v: Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => continue };
+
+        // outer timestamp -> last_ts tracking (first_ts overridden by session_meta.payload.timestamp later if available)
+        if let Some(ts_str) = v.get("timestamp").and_then(|s| s.as_str()) {
+            if let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) {
+                let utc = ts.with_timezone(&Utc);
+                if last_ts.map_or(true, |l| utc > l) { last_ts = Some(utc); }
+                if first_ts.is_none() { first_ts = Some(utc); }
+            }
+        }
+
+        let outer_type = v.get("type").and_then(|s| s.as_str()).unwrap_or("");
+        let payload = match v.get("payload") { Some(p) => p, None => continue };
+
+        match outer_type {
+            "session_meta" => {
+                if session_id.is_empty() {
+                    if let Some(s) = payload.get("id").and_then(|s| s.as_str()) {
+                        session_id = s.to_string();
+                    }
+                }
+                if cwd.is_none() {
+                    if let Some(c) = payload.get("cwd").and_then(|s| s.as_str()) {
+                        cwd = Some(c.to_string());
+                    }
+                }
+                // payload.timestamp is the canonical session start (outer is when log entry was written)
+                if let Some(ts_str) = payload.get("timestamp").and_then(|s| s.as_str()) {
+                    if let Ok(ts) = DateTime::parse_from_rfc3339(ts_str) {
+                        first_ts = Some(ts.with_timezone(&Utc));
+                    }
+                }
+            }
+            "response_item" => {
+                let inner_type = payload.get("type").and_then(|s| s.as_str()).unwrap_or("");
+                if inner_type != "message" { continue; }
+                let role = payload.get("role").and_then(|s| s.as_str()).unwrap_or("");
+                // We index user + assistant chat only. "developer"/"system" carries permission boilerplate.
+                if role != "user" && role != "assistant" { continue; }
+                let content_arr = match payload.get("content") {
+                    Some(Value::Array(arr)) => arr,
+                    _ => continue,
+                };
+                let mut content_text = String::new();
+                for item in content_arr {
+                    if let Some(text) = item.get("text").and_then(|s| s.as_str()) {
+                        if !content_text.is_empty() { content_text.push('\n'); }
+                        content_text.push_str(text);
+                    }
+                }
+                if content_text.is_empty() { continue; }
+                body_buf.push_str(&format!("[{}]\n{}\n---\n", role, content_text));
+                if role == "user" {
+                    user_msg_count += 1;
+                    if first_prompt.is_none() {
+                        first_prompt = Some(truncate_chars(&content_text, 4000));
+                    }
+                    last_user_content = Some(content_text);
+                } else {
+                    asst_msg_count += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Fallback: derive session_id from filename if session_meta line is missing/corrupted.
+    if session_id.is_empty() {
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            // rollout-2026-05-14T05-43-00-019e2314-1bcb-7081-97c2-fda3a9c110fa
+            // Last 5 hyphen-separated tokens form a UUID.
+            let parts: Vec<&str> = stem.split('-').collect();
+            if parts.len() >= 5 {
+                let uuid = parts[parts.len() - 5..].join("-");
+                if uuid.len() == 36 { session_id = uuid; }
+            }
+        }
+        if session_id.is_empty() {
+            anyhow::bail!("no session_meta and unparsable filename: {:?}", path);
+        }
+    }
+
+    let last_prompt = last_user_content.map(|c| truncate_chars(&c, 4000));
+    let title = title_map.get(&session_id).cloned();
+
+    Ok(SessionRow {
+        provider: "codex".into(),
+        session_id,
+        cwd,
+        source_path: path.to_string_lossy().into_owned(),
+        title,
+        first_prompt,
+        last_prompt,
+        first_ts: first_ts.map(|t| t.naive_utc()),
+        last_ts: last_ts.map(|t| t.naive_utc()),
+        message_count: user_msg_count + asst_msg_count,
+        user_msg_count,
+        asst_msg_count,
+        file_size,
+        content_sha256: sha,
+        body_full: body_buf,
     })
 }
 

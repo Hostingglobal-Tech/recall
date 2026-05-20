@@ -63,8 +63,12 @@ Please install https://github.com/Hostingglobal-Tech/recall on this machine.
 ### Codex
 
 ```bash
-codex "Install https://github.com/Hostingglobal-Tech/recall. If Rust is missing, install rustup. Clone to ~/.local/share/recall, cargo build --release, put binary on PATH, copy plugins/claude/SKILL.md to ~/.claude/skills/recall/SKILL.md, then run 'recall init && recall scan && recall daemon install'."
+codex "Install https://github.com/Hostingglobal-Tech/recall. If Rust is missing, install rustup. Clone to ~/.local/share/recall, cargo build --release, put binary on PATH, copy plugins/codex/SKILL.md to ~/.codex/skills/recall/SKILL.md, then run 'recall init && recall scan && recall daemon install'."
 ```
+
+> If you use Claude Code and Codex on the same machine, register both skills:
+> `cp plugins/claude/SKILL.md ~/.claude/skills/recall/SKILL.md` (Claude)
+> `cp plugins/codex/SKILL.md ~/.codex/skills/recall/SKILL.md` (Codex)
 
 After install, never type the commands again — just say what you remember:
 
@@ -82,9 +86,13 @@ cd ~/.local/share/recall
 cargo build --release
 cp target/release/recall ~/.local/bin/
 
-# Register the skill
+# Register the Claude Code skill
 mkdir -p ~/.claude/skills/recall
 cp plugins/claude/SKILL.md ~/.claude/skills/recall/SKILL.md
+
+# Register the Codex skill (if you use Codex on this machine too)
+mkdir -p ~/.codex/skills/recall
+cp plugins/codex/SKILL.md ~/.codex/skills/recall/SKILL.md
 
 # First index + auto-scan
 recall init
