@@ -1,7 +1,8 @@
 //! recall — find any past Claude Code / Codex session by fuzzy memory.
 //!
-//! Single-node, local-first. SQLite + FTS5. **No embeddings, no API keys, no network.**
-//! AI agents call this via the bundled SKILL.md.
+//! Single-node, local-first. SQLite + FTS5. No embeddings, no API keys, no network.
+//! Calls no external commands; reports the `/resume <uuid>` slash-command line
+//! for the user to paste into their current CLI session.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
@@ -92,11 +93,10 @@ enum Cmd {
     Show {
         session_id_prefix: String,
     },
-    /// 세션 resume — claude 면 `claude --resume`, codex 면 `codex resume`
+    /// 세션 찾기 — session_id 와 사용자가 현재 CLI 에 붙여넣을 `/resume <uuid>` 한 줄을 출력.
+    /// 아무 프로세스도 spawn 하지 않음.
     Resume {
         query: String,
-        #[arg(long)]
-        dry_run: bool,
     },
     /// 같은 cwd 의 다른 세션 (1-hop 그래프)
     Related {
@@ -117,7 +117,6 @@ enum Cmd {
 enum DaemonAction {
     /// OS 스케줄러에 주기 `recall scan` 등록 (Linux/macOS: crontab, Windows: Scheduled Task)
     Install {
-        /// 인터벌 (분 단위)
         #[arg(long, default_value_t = 30)]
         interval_min: u32,
     },
@@ -141,7 +140,7 @@ fn main() -> Result<()> {
         Cmd::Scan { provider, force } => cmd_scan(&mut conn, &provider, force)?,
         Cmd::Search { keyword, n, provider } => cmd_search(&conn, &keyword, n, provider.as_deref())?,
         Cmd::Show { session_id_prefix } => cmd_show(&conn, &session_id_prefix)?,
-        Cmd::Resume { query, dry_run } => cmd_resume(&conn, &query, dry_run)?,
+        Cmd::Resume { query } => cmd_resume(&conn, &query)?,
         Cmd::Related { session_id_prefix, n } => cmd_related(&conn, &session_id_prefix, n)?,
         Cmd::Stats => cmd_stats(&conn)?,
         Cmd::Daemon { action } => cmd_daemon(action)?,
@@ -194,7 +193,7 @@ fn truncate_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-// ────────── scan ──────────
+// ----- scan -----
 
 fn cmd_scan(conn: &mut Connection, provider_filter: &str, force: bool) -> Result<()> {
     println!("[recall scan] provider={} force={}", provider_filter, force);
@@ -457,12 +456,12 @@ fn rebuild_edges(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-// ────────── search ──────────
+// ----- search -----
 
 fn cmd_search(conn: &Connection, keyword: &str, n: usize, provider: Option<&str>) -> Result<()> {
     let mut sql = String::from(
         r#"SELECT s.provider, s.session_id, s.cwd, s.title, s.last_prompt, s.last_ts,
-                  snippet(sessions_fts, 4, '«', '»', '…', 12) AS excerpt
+                  snippet(sessions_fts, 4, '<<', '>>', '...', 12) AS excerpt
            FROM sessions_fts
            JOIN sessions s ON s.id = sessions_fts.session_pk
            WHERE sessions_fts MATCH ?1"#,
@@ -523,7 +522,7 @@ fn print_search_results(rows: &[SearchRow], keyword: &str) {
     println!("\n{} matches for '{}'", rows.len(), keyword);
 }
 
-// ────────── show ──────────
+// ----- show -----
 
 fn cmd_show(conn: &Connection, prefix: &str) -> Result<()> {
     let mut stmt = conn.prepare(
@@ -542,7 +541,7 @@ fn cmd_show(conn: &Connection, prefix: &str) -> Result<()> {
     })?.collect::<rusqlite::Result<Vec<_>>>()?;
     if rows.is_empty() { eprintln!("no session for prefix '{}'", prefix); std::process::exit(1); }
     for (prov, sid, cwd, src, title, fp, lp, fts, lts, mc, umc, amc, fs) in rows {
-        println!("──────────────────────────────────────────");
+        println!("------------------------------------------");
         println!("provider   : {}", prov);
         println!("session_id : {}", sid);
         println!("cwd        : {}", cwd.unwrap_or_default());
@@ -552,15 +551,15 @@ fn cmd_show(conn: &Connection, prefix: &str) -> Result<()> {
         println!("last_ts    : {}", lts.unwrap_or_default());
         println!("messages   : total={} user={} asst={}", mc, umc, amc);
         println!("file_size  : {} bytes", fs);
-        if let Some(p) = fp { println!("\n── first prompt ──\n{}\n", p); }
-        if let Some(p) = lp { println!("── last prompt ──\n{}", p); }
+        if let Some(p) = fp { println!("\n--- first prompt ---\n{}\n", p); }
+        if let Some(p) = lp { println!("--- last prompt ---\n{}", p); }
     }
     Ok(())
 }
 
-// ────────── resume ──────────
+// ----- resume -----
 
-fn cmd_resume(conn: &Connection, query: &str, dry_run: bool) -> Result<()> {
+fn cmd_resume(conn: &Connection, query: &str) -> Result<()> {
     let sid_pat = format!("{}%", query);
     let mut stmt = conn.prepare(
         "SELECT provider, session_id, cwd FROM sessions WHERE session_id LIKE ?1 ORDER BY last_ts DESC LIMIT 5",
@@ -588,26 +587,18 @@ fn cmd_resume(conn: &Connection, query: &str, dry_run: bool) -> Result<()> {
         std::process::exit(1);
     }
     let (prov, sid, cwd) = &hits[0];
-    let cmd_str = match prov.as_str() {
-        "claude" => format!("claude --resume {}", sid),
-        "codex" => format!("codex resume {}", sid),
-        _ => { eprintln!("unknown provider {}", prov); std::process::exit(2); }
-    };
-    println!("[recall resume] {} :: {}", prov, sid);
-    if dry_run {
-        println!("[dry-run] would run: {}", cmd_str);
-        if let Some(c) = cwd { println!("[dry-run]   in cwd: {}", c); }
-        return Ok(());
-    }
-    let parts: Vec<&str> = cmd_str.split_whitespace().collect();
-    let mut cmd = std::process::Command::new(parts[0]);
-    cmd.args(&parts[1..]);
-    if let Some(c) = cwd { cmd.current_dir(c); }
-    let status = cmd.status()?;
-    std::process::exit(status.code().unwrap_or(1));
+    println!("matched   : {} :: {}", prov, sid);
+    if let Some(c) = cwd { println!("cwd       : {}", c); }
+    println!();
+    println!("To resume this session, paste the following one-liner into your current CLI:");
+    println!();
+    println!("    /resume {}", sid);
+    println!();
+    println!("(Both claude and codex accept `/resume <session_id>` as an in-session slash command.)");
+    Ok(())
 }
 
-// ────────── stats / related ──────────
+// ----- stats / related -----
 
 fn cmd_stats(conn: &Connection) -> Result<()> {
     let mut stmt = conn.prepare(
@@ -651,7 +642,7 @@ fn cmd_related(conn: &Connection, prefix: &str, n: usize) -> Result<()> {
     Ok(())
 }
 
-// ────────── daemon ──────────
+// ----- daemon -----
 
 fn cmd_daemon(action: DaemonAction) -> Result<()> {
     let bin = std::env::current_exe().context("locate current exe")?;
@@ -668,8 +659,7 @@ fn daemon_install(bin: &str, interval_min: u32) -> Result<()> {
     let tr = format!("\"{}\" scan", bin);
     let status = std::process::Command::new("schtasks")
         .args(["/Create", "/TN", "recall-scan", "/TR", &tr, "/SC", "MINUTE", "/MO", &interval_min.to_string(), "/F"])
-        .status()
-        .context("invoke schtasks")?;
+        .status().context("invoke schtasks")?;
     if !status.success() { anyhow::bail!("schtasks /Create failed"); }
     println!("[recall daemon] Windows Scheduled Task 'recall-scan' registered (every {} min)", interval_min);
     Ok(())

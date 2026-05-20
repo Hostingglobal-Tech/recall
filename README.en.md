@@ -9,35 +9,41 @@
 
 ---
 
-## ⚡ The 30-second pitch
+## The 30-second pitch
 
 ```
 You: continue the deno auth-header session we had the other day.
 
 AI:  ➜ recall search "deno auth header"
-     2 matches. Resuming the more recent claude session.
-     ➜ recall resume 3cca0676
+     2 matches. Most recent:
+       claude :: 3cca0676-1106-4c5a-8f1f-1080ad72e4cd
+     Paste this one-liner into the current CLI to return to that session:
 
-[that session is alive again, in the original cwd]
+        /resume 3cca0676-1106-4c5a-8f1f-1080ad72e4cd
+
+You: [copy → paste → Enter]
+
+[that session is alive again, inside the current CLI]
 ```
 
-— You don't memorize `recall`'s commands. **The AI reads SKILL.md and dispatches on its own.**
+— You don't memorize `recall`'s commands. **The AI reads SKILL.md and dispatches on its own**, finds the session_id, and hands you a single `/resume <id>` line. You paste it once.
 
 ---
 
-## 🧩 Why
+## Why
 
 | Pain | recall |
 |---|---|
 | Hundreds of sessions — `claude --resume` / `codex resume` pickers can't surface the right one | Full-text match across body & prompts (SQLite FTS5) |
 | You never renamed or forked — and now can't find the session | Just a keyword, no session_id needed |
-| Cloud sync is overkill / unwanted | **100% local**. Zero network calls, zero telemetry, zero API keys |
+| Cloud sync is overkill / unwanted | 100% local. Zero network calls, zero telemetry, zero API keys |
 | Two tools, two scattered histories | Single index for Claude Code + Codex |
-| Manual reindexing is annoying | `recall daemon install` → auto-scan every 30 min |
+| Manual reindexing is annoying | `recall daemon install` -> auto-scan every 30 min |
+| Spawning a new shell breaks your flow | Outputs the `/resume <id>` slash command — you paste it into the CLI you're already in |
 
 ---
 
-## 🚀 Install — let an AI do it (recommended)
+## Install (recommended: let an AI do it)
 
 If Claude Code or Codex is already OAuth-authenticated, paste this in and walk away.
 
@@ -60,7 +66,7 @@ Please install https://github.com/Hostingglobal-Tech/recall on this machine.
 codex "Install https://github.com/Hostingglobal-Tech/recall. If Rust is missing, install rustup. Clone to ~/.local/share/recall, cargo build --release, put binary on PATH, copy plugins/claude/SKILL.md to ~/.claude/skills/recall/SKILL.md, then run 'recall init && recall scan && recall daemon install'."
 ```
 
-After install, **never type the commands again** — just say what you remember:
+After install, never type the commands again — just say what you remember:
 
 > "continue yesterday's oauth wiring session"
 > "where was the supabase RLS thing we did last week?"
@@ -68,7 +74,7 @@ After install, **never type the commands again** — just say what you remember:
 
 ---
 
-## 🛠️ Install — manual (Rust 1.74+)
+## Install (manual, Rust 1.74+)
 
 ```bash
 git clone https://github.com/Hostingglobal-Tech/recall.git ~/.local/share/recall
@@ -88,23 +94,43 @@ recall daemon install              # every 30 min
 
 ---
 
-## 🔁 Auto-indexing
+## resume — how it works
 
-New sessions get picked up automatically — you don't touch a thing.
+recall spawns nothing. It finds the session_id and prints the one-liner you should paste into your current CLI.
+
+```bash
+$ recall resume "deno auth header"
+matched   : claude :: 3cca0676-1106-4c5a-8f1f-1080ad72e4cd
+cwd       : /home/you/projects/foo
+
+To resume this session, paste the following one-liner into your current CLI:
+
+    /resume 3cca0676-1106-4c5a-8f1f-1080ad72e4cd
+```
+
+Both claude and codex accept `/resume <session_id>` as an in-session slash command. Paste it and the current CLI swaps in that session.
+
+> If you'd rather spawn a fresh process, run `claude --resume <id>` or `codex resume <id>` in a new shell.
+
+---
+
+## Auto-indexing
+
+The `recall daemon` keeps the DB in sync — you don't touch a thing.
 
 ```bash
 recall daemon install --interval-min 30   # register (default 30 min)
-recall daemon status                       # check registration
+recall daemon status                       # check
 recall daemon uninstall                    # remove
 ```
 
 Backends:
-- **Linux / macOS** → adds a `crontab` line
-- **Windows** → registers Scheduled Task `recall-scan`
+- Linux / macOS: adds a `crontab` line
+- Windows: registers Scheduled Task `recall-scan`
 
 ---
 
-## 🤖 Commands the AI invokes (for reference)
+## Commands the AI invokes (for reference)
 
 You normally don't need to type these.
 
@@ -112,19 +138,19 @@ You normally don't need to type these.
 |---|---|
 | `recall init` | create `~/.recall/recall.db` |
 | `recall scan [--provider claude\|codex\|all] [--force]` | sha256-incremental indexing |
-| `recall search "<keyword>"` | FTS5 full-text (title + first/last prompt + body) |
+| `recall search "<keyword>"` | FTS5 full-text |
 | `recall show <session_id_prefix>` | metadata + first/last prompt |
-| `recall resume <id\|keyword> [--dry-run]` | dispatch `claude --resume` / `codex resume` in original cwd |
+| `recall resume <id\|keyword>` | locate session_id and print the `/resume <uuid>` one-liner (no spawn) |
 | `recall related <session_id_prefix>` | sessions sharing the same `cwd` (1-hop graph) |
 | `recall stats` | per-provider counts |
 | `recall daemon install/status/uninstall` | manage auto-scan |
 
 ---
 
-## 📂 Data layout
+## Data layout
 
 ```
-~/.recall/recall.db   # SQLite (sessions + FTS5 + edges only)
+~/.recall/recall.db   # SQLite (sessions + FTS5 + edges)
 ```
 
 Schema:
@@ -138,18 +164,18 @@ No API key. No config file. No external services.
 
 ---
 
-## 🔒 Privacy
+## Privacy
 
-- **Zero network calls.** Install, build, run — nothing reaches out.
-- **No telemetry.**
-- Original session files are **read-only**. `recall` writes only to `~/.recall/`.
-- `resume` execs the official `claude` / `codex` binary — recall never mutates conversation state.
+- Zero network calls. Install, build, run — nothing reaches out.
+- No telemetry.
+- Original session files are read-only. recall writes only to `~/.recall/`.
+- recall spawns no other process. You paste `/resume` into your current CLI and it swaps the session in place.
 
 ---
 
-## ❓ FAQ
+## FAQ
 
-**Does it work without `claude` / `codex` installed?** `search` / `show` yes. `resume` needs the original CLI on PATH.
+**Does it work without claude / codex installed?** `search` / `show` yes. The `/resume` line is meaningful only inside a running claude or codex CLI.
 
 **Multi-machine?** No — single-node by design.
 
@@ -159,6 +185,6 @@ No API key. No config file. No external services.
 
 ---
 
-## 📜 License
+## License
 
 [MIT](LICENSE)
